@@ -1,2 +1,7 @@
 include/user_config.h
-
+.cproject
+.project
+build/
+firmware/
+.settings/
+.DS_Store
