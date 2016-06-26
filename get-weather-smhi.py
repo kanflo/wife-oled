@@ -2,7 +2,7 @@
 #
 # Pull current weather forecast for given lat/lon from the
 # Swedish Meteorological and Hydrological Institute (SMHI)
-# Will only work for places in Sweden.
+# Will only work for places in Sweden. Uses API version 2.
 #
 
 import os, time
@@ -16,6 +16,7 @@ from dateutil import tz
 from dateutil.parser import parse
 import paho.mqtt.client as mosquitto
 from optparse import OptionParser
+import traceback
 
 
 def getSMHIWeather(lat, lon):
@@ -24,20 +25,25 @@ def getSMHIWeather(lat, lon):
         with open("w.json") as f:
             data = f.read()
     else:
-        url = "http://opendata-download-metfcst.smhi.se/api/category/pmp1.5g/version/1/geopoint/lat/%s/lon/%s/data.json" % (lat, lon)
+        url = "http://opendata-download-metfcst.smhi.se/api/category/pmp2g/version/2/geotype/point/lon/%s/lat/%s/data.json" % (lon, lat)
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.75.14 (KHTML, like Gecko) Version/7.0.3 Safari/7046A194A'
         }
-        r = requests.get(url, headers = headers)
+        try:
+            r = requests.get(url, headers = headers)
+        except Exception as e:
+            sys.stderr.write("Got exception: %s" % (e))
+            print traceback.format_exc()
+            return None
         if r.status_code == 200:
             data = r.text
             with open("w.json", "r+") as f:
                 f.write(data)
         else:
-            sys.stderr.write("HTTP get failed with %d\n" % (r.status_code))
+            sys.stderr.write("HTTP get failed with %d for %s\n" % (r.status_code, url))
     if data:
         w = json.loads(data)
-        return w["timeseries"]
+        return w["timeSeries"]
     else:
         return None
 
@@ -117,6 +123,7 @@ def main():
             series = getSMHIWeather(options.lat, options.lon)
             if not series:
                 sys.stderr.write("Weather loading failed\n")
+                time.sleep(5*60)
             else:
                 for w in series:
                     utc = parse(w["validTime"])
@@ -124,18 +131,23 @@ def main():
                     # Convert time zone
                     local = utc.astimezone(tz.tzlocal())
                     if local < future and local + datetime.timedelta(hours=1) >= future:
-                        temp = float(w["t"])
-                        if temp > -5 and temp < 5:
-                            temp = "%.1f" % temp
+                        if not w or not "parameters" in w:
+                            print "[%s] Error in response : %s" % (now, w)
                         else:
-                            temp = "%d" % temp
+                            for p in w["parameters"]:
+                                if p["name"] == "t":
+                                    temp = float(p["values"][0])
+                                    if temp > -5 and temp < 5:
+                                        temp = "%.1f" % temp
+                                    else:
+                                        temp = "%d" % temp
 
-                        print "[%s] It's %s time, in %d hours the temperature will be %s degrees celcius" % (now, tod, futureHourOffset, temp)
+                                    print "[%s] It's %s time, in %d hours the temperature will be %s degrees celcius" % (now, tod, futureHourOffset, temp)
 
-                        mqttc.publish(options.topic, temp, retain=True)
-                        mqttc.publish("home/temperature/forecast", temp, retain=True) # Temporary
+                                    mqttc.publish(options.topic, temp, retain=True)
+                                    mqttc.publish("home/temperature/forecast", temp, retain=True) # Temporary
 
-            time.sleep(30*60)
+                time.sleep(30*60)
     except Exception as e:
         sys.stderr.write("Got exception: %s" % (e))
         print traceback.format_exc()
