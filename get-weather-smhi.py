@@ -5,19 +5,32 @@
 # Will only work for places in Sweden. Uses API version 2.
 #
 
-import os, time
-import requests
+import os, time, sys
+try:
+    import requests
+except ImportError, e:
+    print("Python module requests not found, 'sudo pip install requests'")
+    sys.exit(0)
 import sys
 import json
 import datetime
 import random
 import socket
-from dateutil import tz
-from dateutil.parser import parse
-import paho.mqtt.client as mosquitto
+try:
+    from dateutil import tz
+    from dateutil.parser import parse
+except ImportError, e:
+    print("Python module dateutil not found, 'sudo pip install python-dateutil'")
+    sys.exit(0)
+
+try:
+    import paho.mqtt.client as mosquitto
+except ImportError, e:
+    print("Python module paho.mqtt.client not found, 'sudo pip install paho-mqtt'")
+    sys.exit(0)
+
 from optparse import OptionParser
 import traceback
-
 
 def getSMHIWeather(lat, lon):
     data = None
@@ -37,7 +50,7 @@ def getSMHIWeather(lat, lon):
             return None
         if r.status_code == 200:
             data = r.text
-            with open("w.json", "r+") as f:
+            with open("w.json", "w+") as f:
                 f.write(data)
         else:
             sys.stderr.write("HTTP get failed with %d for %s\n" % (r.status_code, url))
