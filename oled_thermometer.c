@@ -295,8 +295,6 @@ static const char* get_wifi_macaddr(void)
 {
     static char macaddr[18];
     static bool done = false;
-    int8_t i;
-    uint8_t x;
     if (done)
         return macaddr;
     if (!sdk_wifi_get_macaddr(STATION_IF, (uint8_t *)macaddr)) {
