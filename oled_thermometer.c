@@ -44,6 +44,15 @@
 #define SCL_PIN 0
 #define SDA_PIN 2
 
+#define GPIO_BUTTON 0
+//#define GPIO_BUTTON 5
+/** Pressing the button lights up the display if dimmed or off, go back to
+ *  previous setting after this time
+ */
+#define BUTTON_ACTION_TIME_MS  (5000)
+#define BUTTON_DEBOUNCE_TIME_MS  (150)
+
+/** Size of display */
 #define DISPLAY_WIDTH  (128)
 #define DISPLAY_HEIGHT (32)
 
@@ -70,15 +79,21 @@ static uint8_t buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT / 8];
 #define delay_ms(t) vTaskDelay((t) / portTICK_PERIOD_MS)
 #define get_time_ms() (xTaskGetTickCount() / configTICK_RATE_HZ)
 
+/** Mutes for display updates */
+SemaphoreHandle_t display_sem;
 /** A semaphose that incicates wifi connection */
 SemaphoreHandle_t wifi_connected;
-/** MQTT publishs queue */
+/** MQTT publish queue */
 QueueHandle_t publish_queue;
+/** Button press queue */
+QueueHandle_t button_queue;
 
-#define PUB_MSG_LEN 16
+#define PUB_MSG_LEN 32
 
 /** Shall we draw stuff on the display of should it be considered off? */
 bool display_on = true;
+/** Is the display dimmed? */
+bool display_dimmed = false;
 /** Latest received temperature */
 char temperature[PUB_MSG_LEN] = {0};
 /** Latest received forecasted temperature */
@@ -91,6 +106,34 @@ uint32_t kerning = 1;
  #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif // MIN
 
+/** Forward declarations to keep the compiler happy */
+void gpio_irq_handler(uint8_t gpio_num);
+static void display_message(char *msg, bool is_error);
+static const char* get_wifi_macaddr(void);
+
+/**
+ * @brief      Button IRQ handler
+ *
+ * @param[in]  gpio_num  The gpio number
+ */
+void gpio_irq_handler(uint8_t gpio_num)
+{
+    uint32_t now_ms = xTaskGetTickCountFromISR() * portTICK_PERIOD_MS;
+    (void) xQueueSendToBackFromISR(button_queue, &now_ms, NULL);
+}
+
+/**
+ * @brief      Restart the system
+ */
+static void restart(void)
+{
+    display_message("Restarting", true);
+    /** In case we hang in the restart */
+    ssd1306_fade_out(&dev);
+    sdk_system_restart();
+    display_message("Restart failed", true);
+    while(1);
+}
 
 /**
  * @brief      Lazy function for clearing the display
@@ -113,6 +156,7 @@ static void refresh_display(void)
  */
 static void update_temperatures(void)
 {
+    xSemaphoreTake(display_sem, portMAX_DELAY);
     clear_display();
     if (display_on) {
         if (temperature[0]) {
@@ -124,6 +168,7 @@ static void update_temperatures(void)
         }
     }
     refresh_display();
+    xSemaphoreGive(display_sem);
 }
 
 /**
@@ -134,6 +179,10 @@ static void update_temperatures(void)
  */
 static void display_message(char *msg, bool is_error)
 {
+    xSemaphoreTake(display_sem, portMAX_DELAY);
+    if (msg) {
+        printf("%sDisplaying message '%s'\n", is_error ? "Error: " : "", msg);
+    }
     clear_display();
     if (display_on) {
         uint8_t char_height = 8;
@@ -143,6 +192,7 @@ static void display_message(char *msg, bool is_error)
         ssd1306_sillydraw_bmp(&dev, buffer, is_error ? 0 : DISPLAY_WIDTH/2-happy_mac_width/2 , 0, is_error ? sad_mac_width : happy_mac_width, is_error ? sad_mac_height : happy_mac_height, is_error ? sad_mac_bits : happy_mac_bits);
     }
     refresh_display();
+    xSemaphoreGive(display_sem);
 }
 
 /**
@@ -152,14 +202,17 @@ static void display_message(char *msg, bool is_error)
  */
 static void heartbeat_task(void *pvParameters)
 {
+    (void) pvParameters;
     char msg[PUB_MSG_LEN];
     uint32_t count = 0;
     while (1) {
         delay_ms(HEARTBEAT_TIME_MS);
-        snprintf(msg, PUB_MSG_LEN, "Heartbeat #%d", count++);
+        snprintf((char*) msg, sizeof(msg)-1, "%s-%d", get_wifi_macaddr(), count++);
         if (xQueueSend(publish_queue, (void *)msg, 0) == pdFALSE) {
-            printf("Error: publish queue overflow.\n");
-            display_message("PubQ overflow", true);
+            /** Usually indicates something is up with the wifi connection,
+             *  restart in an attempt to fix it.
+             */
+            restart();
         }
     }
 }
@@ -186,11 +239,7 @@ static void handle_temperature_topic(mqtt_message_data_t *md)
 static void handle_reboot_topic(mqtt_message_data_t *md)
 {
     (void) md;
-    printf("Restarting system\n");
-    sdk_system_restart();
-    printf("Restart failed :-/\n");
-    while(1);
-
+    restart();
 }
 
 /**
@@ -220,16 +269,20 @@ static void handle_display_topic(mqtt_message_data_t *md)
     strncpy(payload, message->payload, MIN(sizeof(payload)-1, message->payloadlen));
 
     if (strcmp(payload, "fadein") == 0) {
+        display_dimmed = false;
         ssd1306_fade_in(&dev);
     } else if (strcmp(payload, "fadeout") == 0) {
+        display_dimmed = true;
         ssd1306_fade_out(&dev);
     } else if (strcmp(payload, "on") == 0) {
         display_on = true;
         update_temperatures();
     } else if (strcmp(payload, "off") == 0) {
         display_on = false;
+        xSemaphoreTake(display_sem, portMAX_DELAY);
         clear_display();
         refresh_display();
+        xSemaphoreGive(display_sem);
     }
 }
 
@@ -264,12 +317,61 @@ static const char* get_wifi_macaddr(void)
 }
 
 /**
+ * @brief      The button handler task. If turned off the display will be
+ *             momentarily turned on and then turned off after a slight
+ *             delay. The same goes if the display was dimmed.
+ *
+ * @param      pvParameters  not used
+ */
+static void button_task(void *pvParameters)
+{
+    (void) pvParameters;
+    uint32_t last = 0;
+    /** Take a nap while we connect to wifi */
+    delay_ms(5000);
+    while(1) {
+        uint32_t button_ts;
+        xQueueReceive(button_queue, &button_ts, portMAX_DELAY);
+        if (last < button_ts - BUTTON_DEBOUNCE_TIME_MS) {
+            printf("Button pressed at %dms\r\n", button_ts);
+            last = button_ts;
+            if (!display_on) {
+                printf("  Turning display on\n");
+                display_on = true;
+                update_temperatures();
+                delay_ms(BUTTON_ACTION_TIME_MS);
+                /** Might have changed while we took a nap */
+                if (!display_on) {
+                    printf("  Turning display off\n");
+                    display_on = false;
+                    update_temperatures();
+                }
+            } else if (display_dimmed) {
+                printf("  Fading in display\n");
+                ssd1306_fade_in(&dev);
+                update_temperatures();
+                delay_ms(BUTTON_ACTION_TIME_MS);
+                /** Might have changed while we took a nap */
+                if (display_dimmed) {
+                    printf("  Fading out display\n");
+                    ssd1306_fade_out(&dev);
+                    update_temperatures();
+                }
+            } else {
+                printf("  No action taken\n");
+            }
+        }
+    }
+}
+
+/**
  * @brief      The MQTT pub/sub main task
  *
  * @param      pvParameters  not used
  */
 static void mqtt_task(void *pvParameters)
 {
+    (void) pvParameters;
     int ret = 0;
     struct mqtt_network network;
     mqtt_client_t client = mqtt_client_default;
@@ -285,14 +387,18 @@ static void mqtt_task(void *pvParameters)
 
     while(1) {
         xSemaphoreTake(wifi_connected, portMAX_DELAY);
-        printf("%s: Connecting to MQTT server %s ... ",__func__, MQTT_HOST);
+        printf("Connecting to MQTT broker %s\n", MQTT_HOST);
         ret = mqtt_network_connect(&network, MQTT_HOST, MQTT_PORT);
-        if(ret) {
-            printf("error: %d\n", ret);
+        if (ret) {
+            printf("Error: failed to connect to broker (%d)\n", ret);
+            /** Occasionally the wifi semaphore will not get locked so we end up in
+             *  an infinite loop here spewing error prints until wifi is
+             *  reconnected.
+             */
+            delay_ms(5000);
             taskYIELD();
             continue;
         }
-        printf("done\n");
         mqtt_client_new(&client, &network, 5000, mqtt_buf, 100, mqtt_readbuf, 100);
 
         data.willFlag       = 0;
@@ -302,16 +408,15 @@ static void mqtt_task(void *pvParameters)
         data.password.cstring   = MQTT_PASS;
         data.keepAliveInterval  = 10;
         data.cleansession   = 0;
-        printf("Send MQTT connect ... ");
+        printf("Connecting to broker\n");
         ret = mqtt_connect(&client, &data);
-        if(ret) {
-            printf("error: %d\n", ret);
+        if (ret) {
+            printf("Error: failed to connect to broker (%d)\n", ret);
             mqtt_network_disconnect(&network);
             taskYIELD();
             continue;
         }
-        printf("done\n");
-       
+        printf("Connected to broker\n");
         mqtt_subscribe(&client, OUTSIDE_TEMP_TOPIC, MQTT_QOS1, handle_temperature_topic);
         mqtt_subscribe(&client, OUTSIDE_TEMP_FORECAST_TOPIC, MQTT_QOS1, handle_forecast_topic);
         mqtt_subscribe(&client, REBOOT_TOPIC, MQTT_QOS1, handle_reboot_topic);
@@ -331,7 +436,7 @@ static void mqtt_task(void *pvParameters)
                 message.retained = 0;
                 ret = mqtt_publish(&client, HEARTBEAT_TOPIC, &message);
                 if (ret != MQTT_SUCCESS) {
-                    printf("error while publishing message: %d\n", ret);
+                    printf("Error: failed to publish message (%d)\n", ret);
                     break;
                 }
             }
@@ -340,7 +445,7 @@ static void mqtt_task(void *pvParameters)
             if (ret == MQTT_DISCONNECTED)
                 break;
         }
-        printf("Connection dropped, request restart\n");
+        printf("Broker connection dropped, request restart\n");
         mqtt_network_disconnect(&network);
         taskYIELD();
     }
@@ -353,6 +458,7 @@ static void mqtt_task(void *pvParameters)
  */
 static void wifi_task(void *pvParameters)
 {
+    (void) pvParameters;
     uint8_t status  = 0;
     uint8_t retries = 30;
     uint32_t last_connect = 0;
@@ -361,7 +467,7 @@ static void wifi_task(void *pvParameters)
         .password = WIFI_PASS,
     };
 
-    printf("WiFi: connecting to WiFi\n");
+    printf("Wifi: connecting\n");
     display_message(NULL, false);
 
     sdk_wifi_set_opmode(STATION_MODE);
@@ -370,45 +476,65 @@ static void wifi_task(void *pvParameters)
     while(1) {
         while ((status != STATION_GOT_IP) && (retries)) {
             status = sdk_wifi_station_get_connect_status();
-            printf("%s: status = %d\n", __func__, status);
-            if(status == STATION_WRONG_PASSWORD) {
-                printf("WiFi: wrong password\n");
-                break;
-            } else if(status == STATION_NO_AP_FOUND) {
-                printf("WiFi: AP not found\n");
-                break;
-            } else if(status == STATION_CONNECT_FAIL) {
-                printf("WiFi: connection failed\n");
-                break;
+            switch(status) {
+                case STATION_IDLE:
+                    printf("Wifi: idle\n");
+                    break;
+                case STATION_CONNECTING:
+                    printf("Wifi: connecting\n");
+                    break;
+                case STATION_WRONG_PASSWORD:
+                    display_message("Wrong password", true);
+                    break;
+                case STATION_NO_AP_FOUND:
+                    display_message("AP not found", true);
+                    break;
+                case STATION_CONNECT_FAIL:
+                    display_message("Connect failed", true);
+                    break;
+                case STATION_GOT_IP:
+                    printf("Wifi: got IP\n");
+                    display_message(NULL, false);
+                    last_connect = get_time_ms();
+                    xSemaphoreGive(wifi_connected);
+                    taskYIELD();
+                    break;
             }
             delay_ms(1000);
             retries--;
-        }
-        if (status == STATION_GOT_IP) {
-            printf("WiFi: Connected\n");
-            display_message(NULL, false);
-            last_connect = get_time_ms();
-            xSemaphoreGive(wifi_connected);
-            taskYIELD();
         }
 
         while ((status = sdk_wifi_station_get_connect_status()) == STATION_GOT_IP) {
             xSemaphoreGive(wifi_connected);
             taskYIELD();
         }
-        printf("WiFi: disconnected\n");
         display_message("Wifi disconnected", true);
         if (get_time_ms() - last_connect > WIFI_RESTART_TIME_MS) {
             printf("No wifi connection within %ds, restarting...\n", WIFI_RESTART_TIME_MS/1000);
-            sdk_system_restart();
-            printf("Restart failed :-/\n");
+            restart();
         }
         sdk_wifi_station_disconnect();
         retries = 30;
         delay_ms(1000);
+        /** @todo: added this as a feeble attempt to reconnect to wifi as it
+         *  sometimes fails */
+        sdk_wifi_set_opmode(STATION_MODE);
+        sdk_wifi_station_set_config(&config);
     }
 }
 
+/**
+ * @brief      Initialize the button IRQ
+ */
+static void button_init(void)
+{
+    gpio_set_pullup(GPIO_BUTTON, true, false);
+    gpio_set_interrupt(GPIO_BUTTON, GPIO_INTTYPE_EDGE_NEG, gpio_irq_handler);
+}
+
+/**
+ * @brief      Initialize the OLED driver
+ */
 static void oled_init(void)
 {
     i2c_init(I2C_BUS, SCL_PIN, SDA_PIN, I2C_FREQ_400K);
@@ -432,9 +558,13 @@ void user_init(void)
     uart_set_baud(0, 115200);
     printf("SDK version:%s\n", sdk_system_get_sdk_version());
     oled_init();
+    button_init();
     vSemaphoreCreateBinary(wifi_connected);
+    vSemaphoreCreateBinary(display_sem);
     publish_queue = xQueueCreate(3, PUB_MSG_LEN);
+    button_queue = xQueueCreate(1, sizeof(uint32_t));
     xTaskCreate(&wifi_task, "wifi_task",  256, NULL, 2, NULL);
     xTaskCreate(&heartbeat_task, "heartbeat_task", 256, NULL, 3, NULL);
     xTaskCreate(&mqtt_task, "mqtt_task", 1024, NULL, 4, NULL);
+    xTaskCreate(&button_task, "button_task", 1024, NULL, 4, NULL);
 }
