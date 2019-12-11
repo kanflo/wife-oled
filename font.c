@@ -29,7 +29,7 @@
  * @param[in]  size     Font size (FONT_SMALL or FONT_LARGE)
  * @param[in]  kerning  Kerning between characters
  *
- * @return     { description_of_the_return_value }
+ * @return     width of string
  */
 uint32_t font_string_width(char *str, uint32_t size, int32_t kerning)
 {
