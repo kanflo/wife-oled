@@ -32,6 +32,7 @@
 #include <i2c/i2c.h>
 #include <ssd1306/ssd1306.h>
 #include <fonts/fonts.h>
+#include <idiota.h>
 #include "font_bits.h"
 #include "icon_bits.h"
 #include "font.h"
@@ -106,10 +107,104 @@ uint32_t kerning = 1;
  #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif // MIN
 
+
+#ifdef CONFIG_IDIOTA_SERVER
+ #define IDIOTA_SERVER       CONFIG_IDIOTA_SERVER
+#else
+ #define IDIOTA_SERVER       "172.16.3.113"
+#endif // CONFIG_IDIOTA_SERVER
+
+#ifdef CONFIG_IDIOTA_PORT
+ #define IDIOTA_PORT       CONFIG_IDIOTA_PORT
+#else
+ #define IDIOTA_PORT       "27532"
+#endif // CONFIG_IDIOTA_PORT
+
+#ifdef CONFIG_IDIOTA_CHECK_INTERVAL
+ #define IDIOTA_CHECK_INTERVAL       CONFIG_IDIOTA_CHECK_INTERVAL
+#else
+ #define IDIOTA_CHECK_INTERVAL       1
+#endif // CONFIG_IDIOTA_PORT
+
+#ifdef CONFIG_NODE_ID
+ #define NODE_ID       CONFIG_NODE_ID
+#else
+ #define NODE_ID       NULL
+#endif // CONFIG_IDIOTA_PORT
+
+#ifdef CONFIG_NODE_TYPE
+ #define NODE_TYPE       CONFIG_NODE_TYPE
+#else
+ #define NODE_TYPE       NULL
+#endif // CONFIG_IDIOTA_PORT
+
+#ifdef CONFIG_HW_REVISION
+ #define HW_REV       CONFIG_HW_REVISION
+#else
+ #define HW_REV       NULL
+#endif // CONFIG_HW_REVISION
+
 /** Forward declarations to keep the compiler happy */
 void gpio_irq_handler(uint8_t gpio_num);
 static void display_message(char *msg, bool is_error);
 static const char* get_wifi_macaddr(void);
+
+
+void ota_status_cb(ota_status_t status);
+
+static ota_info ota_config = {
+    .server         = IDIOTA_SERVER,
+    .port           = IDIOTA_PORT,
+    .check_interval = IDIOTA_CHECK_INTERVAL,
+    .node_id        = NODE_ID,
+    .node_type      = NODE_TYPE,
+    .hw_rev         = HW_REV,
+    .ota_cb         = ota_status_cb
+};
+
+void ota_status_cb(ota_status_t status)
+{
+    switch(status) {
+        case OTA_DNS_LOOKUP_FAILED:
+            printf("Error: DNS lookup has failed\n");
+            break;
+        case OTA_SOCKET_ALLOCATION_FAILED:
+            printf("Error: could not allocate OTA socket\n");
+            break;
+        case OTA_SOCKET_CONNECTION_FAILED:
+            printf("Error: failed to connect to server %s:%s\n", IDIOTA_SERVER, IDIOTA_PORT);
+            break;
+        case OTA_SHA256_MISMATCH:
+            printf("Error: downloaded SHA256 does not match downloaded binary\n");
+            break;
+        case OTA_REQUEST_SEND_FAILED:
+            printf("Error: could not send OTA HTTP request\n");
+            break;
+        case OTA_DOWNLOAD_SIZE_MISMATCH:
+            printf("Error: OTA download failed\n");
+            break;
+        case OTA_ONE_SLOT_ONLY:
+            printf("Error: rboot has only one slot configured, cannot run OTA\n");
+            break;
+        case OTA_FAIL_SET_NEW_SLOT:
+            printf("Error: rboot failed to switch\n");
+            break;
+        case OTA_IMAGE_VERIFY_FAILED:
+            printf("Error: rboot verification failed\n");
+            break;
+        case OTA_START:
+            printf("OTA started\n");
+            break;
+        case OTA_RUNNING:
+            //printf("OTA running\n");
+            break;
+        case OTA_COMPLETED:
+            printf("OTA successful\n");
+            break;
+        case OTA_IDLE:
+            break;
+    }
+}
 
 /**
  * @brief      Button IRQ handler
@@ -552,8 +647,21 @@ void user_init(void)
     vSemaphoreCreateBinary(display_sem);
     publish_queue = xQueueCreate(3, PUB_MSG_LEN);
     button_queue = xQueueCreate(1, sizeof(uint32_t));
-    xTaskCreate(&wifi_task, "wifi_task",  256, NULL, 2, NULL);
-    xTaskCreate(&heartbeat_task, "heartbeat_task", 256, NULL, 3, NULL);
-    xTaskCreate(&mqtt_task, "mqtt_task", 1024, NULL, 4, NULL);
-    xTaskCreate(&button_task, "button_task", 1024, NULL, 4, NULL);
+    if (pdPASS != xTaskCreate(&wifi_task, "wifi_task",  256, NULL, 2, NULL)) {
+        printf("Error: failed to create wifi task\n");
+    }
+    if (pdPASS != xTaskCreate(&heartbeat_task, "heartbeat_task", 256, NULL, 3, NULL)) {
+        printf("Error: failed to create wifi task\n");
+    }
+    if (pdPASS != xTaskCreate(&mqtt_task, "mqtt_task", 1024, NULL, 4, NULL)) {
+        printf("Error: failed to create mqtt task\n");
+    }
+#if 1
+    if (pdPASS != xTaskCreate(&button_task, "button_task", 256, NULL, 4, NULL)) {
+        printf("Error: failed to create button task\n");
+    }
+#endif
+    if (!ota_init(&ota_config)) {
+        printf("Failed to start OTA\n");
+    }
 }
