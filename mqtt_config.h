@@ -13,6 +13,7 @@
 /** Topic to reboot device */
 #define REBOOT_TOPIC                "oledthermometer/reboot"
 /** A topic for managing display on, off and display fading */
+/** Valid messages are 'fadein', 'fadeout', 'off' and 'on' */
 #define DISPLAY_TOPIC               "oledthermometer/display"
 
 /** Heartbeats from the display are published on this topic every
