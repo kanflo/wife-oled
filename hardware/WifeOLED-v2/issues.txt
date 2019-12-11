@@ -1,0 +1,6 @@
+Issues with v2
+--------------
+The following issues have been identified after v2 came back from China:
+
+X2      GPIO0 from the esprog connector is not connected to GPIO0/SCL meaning
+        a manual ground is needed for espprog programming.
