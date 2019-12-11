@@ -1,3 +1,6 @@
 [submodule "esp-open-rtos"]
 	path = esp-open-rtos
 	url = https://github.com/SuperHouse/esp-open-rtos.git
+[submodule "idiota"]
+	path = idiota
+	url = https://github.com/kanflo/idiota.git
