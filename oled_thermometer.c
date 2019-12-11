@@ -207,7 +207,7 @@ static void heartbeat_task(void *pvParameters)
     uint32_t count = 0;
     while (1) {
         delay_ms(HEARTBEAT_TIME_MS);
-        snprintf((char*) msg, sizeof(msg)-1, "%s-%d", get_wifi_macaddr(), count++);
+        snprintf((char*) msg, sizeof(msg), "%s-%d", get_wifi_macaddr(), count++);
         if (xQueueSend(publish_queue, (void *)msg, 0) == pdFALSE) {
             /** Usually indicates something is up with the wifi connection,
              *  restart in an attempt to fix it.
@@ -226,7 +226,7 @@ static void handle_temperature_topic(mqtt_message_data_t *md)
 {
     mqtt_message_t *message = md->message;
     memset((void*) temperature, 0, sizeof(temperature));
-    strncpy(temperature, message->payload, MIN(sizeof(temperature)-1, message->payloadlen));
+    strncpy(temperature, message->payload, MIN(sizeof(temperature), message->payloadlen));
     update_temperatures();
     printf("Temperature: %s\n", temperature);
 }
@@ -251,7 +251,7 @@ static void handle_forecast_topic(mqtt_message_data_t *md)
 {
     mqtt_message_t *message = md->message;
     memset((void*) forecast, 0, sizeof(forecast));
-    strncpy(forecast, message->payload, MIN(sizeof(forecast)-1, message->payloadlen));
+    strncpy(forecast, message->payload, MIN(sizeof(forecast), message->payloadlen));
     update_temperatures();
     printf("Forecast:    %s\n", forecast);
 }
@@ -266,7 +266,7 @@ static void handle_display_topic(mqtt_message_data_t *md)
     char payload[32];
     mqtt_message_t *message = md->message;
     memset((void*) payload, 0, sizeof(payload));
-    strncpy(payload, message->payload, MIN(sizeof(payload)-1, message->payloadlen));
+    strncpy(payload, message->payload, MIN(sizeof(payload), message->payloadlen));
 
     if (strcmp(payload, "fadein") == 0) {
         display_dimmed = false;
