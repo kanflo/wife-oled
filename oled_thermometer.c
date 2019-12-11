@@ -287,14 +287,13 @@ static void handle_display_topic(mqtt_message_data_t *md)
 }
 
 /**
- * @brief      Return MAC address
+ * @brief      Return MAC address for station interface
  *
- * @return     MAC address.
+ * @return     MAC address formatted as 'xx:xx:xx:xx:xx:xx'
  */
 static const char* get_wifi_macaddr(void)
 {
-    // Use MAC address for Station as unique ID
-    static char macaddr[13];
+    static char macaddr[18];
     static bool done = false;
     int8_t i;
     uint8_t x;
@@ -303,15 +302,7 @@ static const char* get_wifi_macaddr(void)
     if (!sdk_wifi_get_macaddr(STATION_IF, (uint8_t *)macaddr)) {
         return NULL;
     }
-    for (i = 5; i >= 0; --i) {
-        x = macaddr[i] & 0x0F;
-        if (x > 9) x += 7;
-        macaddr[i * 2 + 1] = x + '0';
-        x = macaddr[i] >> 4;
-        if (x > 9) x += 7;
-        macaddr[i * 2] = x + '0';
-    }
-    macaddr[12] = '\0';
+    snprintf((char*) macaddr, sizeof(macaddr), "%02x:%02x:%02x:%02x:%02x:%02x", macaddr[0], macaddr[1], macaddr[2], macaddr[3], macaddr[4], macaddr[5]);
     done = true;
     return macaddr;
 }
