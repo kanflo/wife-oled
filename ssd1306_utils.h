@@ -18,8 +18,8 @@
 
 */
 
-#ifndef __SSD1603_UTILS_H__
-#define __SSD1603_UTILS_H__
+#ifndef __SSD1306_UTILS_H__
+#define __SSD1306_UTILS_H__
 
 #include <stdint.h>
 #include <ssd1306/ssd1306.h>
@@ -73,4 +73,4 @@ int ssd1306_fade_out(const ssd1306_t *dev);
 int ssd1306_fade_in(const ssd1306_t *dev);
 
 
-#endif // __SSD1603_UTILS_H__
+#endif // __SSD1306_UTILS_H__
